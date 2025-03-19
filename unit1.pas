@@ -4,7 +4,7 @@ interface
 
 uses
   Windows, Messages, SysUtils, Variants, Classes, Graphics, Controls, Forms,
-  Dialogs, ExtCtrls, UniqueInstance, MultiMon, Winsock, contnrs, Math, DateUtils;
+  Dialogs, ExtCtrls, UniqueInstance, MultiMon, Winsock, contnrs, Math, DateUtils,MMSystem;
 
 const
   DISPLAY_DEVICE_ACTIVE = $00000001;
@@ -33,6 +33,11 @@ const
   FLAG_RED = TColor($0000FF); // BGR format in Delphi
   FLAG_BLUE = TColor($FF0000); // BGR format
   FLAG_WHITE = TColor($FFFFFF);
+
+
+   ES_SYSTEM_REQUIRED = $00000001;
+  ES_DISPLAY_REQUIRED = $00000002;
+  ES_CONTINUOUS = $80000000;
 
 type
   // Text position record
@@ -131,6 +136,9 @@ type
 
   private
     // Original variables
+    FTotalDiskSpace: Int64;
+      FFreeDiskSpace: Int64;
+    FDiskCheckCounter: Integer;
     HebrewText: WideString;
     TextStreams: array of array of TTextPosition;
     MouseMoved: Boolean;
@@ -149,6 +157,7 @@ type
     FPingTime: Integer;
     FSystemUptime: Int64;
     InitialMonitorCount: Integer;
+    FFormattedDateTime: string;
 
     // Flag movement variables
     FlagOffsetX: Integer;
@@ -260,6 +269,7 @@ type
   function IcmpSendEcho(IcmpHandle: THandle; DestinationAddress: DWORD; RequestData: Pointer;
     RequestSize: WORD; RequestOptions: Pointer; ReplyBuffer: Pointer;
     ReplySize: DWORD; Timeout: DWORD): DWORD; stdcall; external 'icmp.dll' name 'IcmpSendEcho';
+  function SetThreadExecutionState(esFlags: DWORD): DWORD; stdcall; external 'kernel32.dll';
 
 procedure CreateFormsForAllMonitors;
 function FormatUptime(Uptime: Int64): string;
@@ -277,7 +287,7 @@ implementation
 
 const
   BaseFallSpeed = 5;
-  NumStreams = 30; // Number of text streams
+  NumStreams = 15; // Number of text streams
   MouseSensitivity = 10; // Sensitivity threshold for mouse movement (in pixels)
   InfoTextSpacing = 40; // Vertical spacing between info texts
 
@@ -467,6 +477,10 @@ begin
   BorderStyle := bsNone;
   WindowState := wsMaximized;
 
+  DiskSpace := 1; // Start with non-zero values
+  FUsedDiskSpace := 0;
+  FDiskCheckCounter := 6;
+
   // Initialize flag movement
   FlagOffsetX := 0;
   FlagOffsetY := 0;
@@ -482,7 +496,7 @@ begin
   FlagMoveTimer := TTimer.Create(Self);
   FlagMoveTimer.Interval := 5000; // Move every 5 seconds
   FlagMoveTimer.OnTimer := @FlagMoveTimerTimer;
-  FlagMoveTimer.Enabled := True;
+  FlagMoveTimer.Enabled := false;
 
   // Initialize wave animation
   FWavePhase := 0;
@@ -1372,17 +1386,28 @@ begin
   TotalPhysicalMemory := MemoryStatus.dwTotalPhys div (1024 * 1024); // Convert to MB
   AvailablePhysicalMemory := MemoryStatus.dwAvailPhys div (1024 * 1024); // Convert to MB
 
-  // Get disk space
+  // Only check disk space periodically
+ Inc(FDiskCheckCounter);
+if FDiskCheckCounter >= 6 then // Check every minute (6 × 10 seconds)
+begin
   if GetDiskFreeSpaceEx('C:\', FreeBytesAvailable, TotalNumberOfBytes, @TotalNumberOfFreeBytes) then
   begin
     DiskSpace := TotalNumberOfFreeBytes div (1024 * 1024 * 1024); // Convert to GB
     UsedDiskSpace := (TotalNumberOfBytes - TotalNumberOfFreeBytes) div (1024 * 1024 * 1024); // Convert to GB
+
+    // Store these values in class variables
+    FUsedDiskSpace := UsedDiskSpace;
+    FTotalDiskSpace := FUsedDiskSpace + DiskSpace;
   end
   else
   begin
-    DiskSpace := 0; // Set to 0 if unable to retrieve disk space
-    UsedDiskSpace := 0;
+    DiskSpace := 1; // Set to 1 to avoid division by zero
+    FUsedDiskSpace := 0;
+    FTotalDiskSpace := 1;
   end;
+  FDiskCheckCounter := 0;
+end;
+
 
   // Get ping time
   PingTime := GetPingTime('8.8.8.8');
@@ -1393,11 +1418,13 @@ begin
   // Store the values in class variables for later display
   FTotalPhysicalMemory := TotalPhysicalMemory;
   FAvailablePhysicalMemory := AvailablePhysicalMemory;
-  FUsedDiskSpace := UsedDiskSpace;
+  //FUsedDiskSpace := UsedDiskSpace;
   FPingTime := PingTime;
   FSystemUptime := SystemUptime;
-end;
 
+  // Add formatted date/time without seconds
+  FFormattedDateTime := FormatDateTime('yyyy-mm-dd hh:nn', Now);
+end;
 function TScreenSaverForm.GetCPUUsage: Integer;
 var
   IdleTime, KernelTime, UserTime: Int64;
@@ -1712,6 +1739,13 @@ var
   MousePos: TPoint;
   ParentWnd: HWND;
 begin
+
+   DoubleBuffered := True;
+
+  FlagOffsetX := 0;
+  FlagOffsetY := 0;
+
+
   // Initialize previous times for CPU usage calculation
   PrevIdleTime := 0;
   PrevKernelTime := 0;
@@ -1730,6 +1764,15 @@ begin
     Application.Terminate;
     Exit;
   end;
+
+  SetThreadExecutionState(ES_CONTINUOUS or ES_SYSTEM_REQUIRED or ES_DISPLAY_REQUIRED);
+
+  // Request higher timer resolution
+  timeBeginPeriod(1);
+
+  // Short delay to let system reach full power
+  Sleep(200);
+
 
   InitialMonitorCount := Screen.MonitorCount;
   MonitorCountTimer := TTimer.Create(Self);
@@ -1787,7 +1830,7 @@ begin
 
     // Enable all enhancement timers
     FWaveTimer.Enabled := false;
-    FTwinkleTimer.Enabled := True;
+    FTwinkleTimer.Enabled := false;
     FQuoteTimer.Enabled := True;
     if FIsHoliday then
       FFireworkTimer.Enabled := false;
@@ -1900,6 +1943,7 @@ begin
 
   // Clean up Winsock
   WSACleanup;
+  timeEndPeriod(1);
 end;
 
 procedure TScreenSaverForm.Timer2Timer(Sender: TObject);
@@ -1988,7 +2032,16 @@ procedure TScreenSaverForm.UpdateTextPositions;
 var
   i, j: Integer;
   Stripe: Integer;
+  ScreenHeight, ScreenWidth: Integer;
+  StripeHeight: Integer;
+  BlueFieldWidth, BlueFieldHeight: Integer;
 begin
+  ScreenHeight := ScreenHeights[FormIndex];
+  ScreenWidth := ScreenWidths[FormIndex];
+  StripeHeight := ScreenHeight div 13;
+  BlueFieldWidth := Round(ScreenWidth * 0.4);
+  BlueFieldHeight := StripeHeight * 7;
+
   for i := 0 to High(TextStreams) do
   begin
     for j := 0 to High(TextStreams[i]) do
@@ -1997,11 +2050,11 @@ begin
       TextStreams[i][j].Y := TextStreams[i][j].Y + TextStreams[i][j].FallingSpeed;
 
       // Determine which stripe the text is on and adjust color
-      Stripe := (TextStreams[i][j].Y div (ScreenHeights[FormIndex] div 13)) mod 13;
+      Stripe := (TextStreams[i][j].Y div StripeHeight) mod 13;
 
       // For text over the flag union (blue field)
-      if (TextStreams[i][j].X < Round(ScreenWidths[FormIndex] * 0.4)) and
-         (TextStreams[i][j].Y < (ScreenHeights[FormIndex] div 13) * 7) then
+      if (TextStreams[i][j].X < BlueFieldWidth) and
+         (TextStreams[i][j].Y < BlueFieldHeight) then
         TextStreams[i][j].TextColor := FLAG_WHITE
       else if Stripe mod 2 = 0 then
         TextStreams[i][j].TextColor := FLAG_WHITE // White text on red stripes
@@ -2009,17 +2062,19 @@ begin
         TextStreams[i][j].TextColor := FLAG_BLUE; // Blue text on white stripes
 
       // If the character goes below the screen height, reset its position
-      if TextStreams[i][j].Y > ScreenHeights[FormIndex] then
+      if TextStreams[i][j].Y > ScreenHeight then
       begin
         // Set a new random X position within the screen width, accounting for character width
-        TextStreams[i][j].X := Random(ScreenWidths[FormIndex] - Canvas.TextWidth(TextStreams[i][j].Char));
+        TextStreams[i][j].X := Random(ScreenWidth - Canvas.TextWidth(TextStreams[i][j].Char));
         // Reset the Y position to start above the screen
         TextStreams[i][j].Y := -Random(100); // Reset Y position above the screen by up to 100 pixels
       end;
     end;
   end;
-end;
 
+  // Always invalidate to ensure screen updates
+  Invalidate;
+end;
 procedure TScreenSaverForm.Timer1Timer(Sender: TObject);
 begin
   UpdateTextPositions;
@@ -2335,14 +2390,14 @@ begin
   begin
     // Traditional text-based system info display with smart sizing
     FormattedUptime := FormatUptime(FSystemUptime);
-    CurrentDateTime := GetCurrentDateTimeFormatted;
-
+    //CurrentDateTime := GetCurrentDateTimeFormatted;
+      CurrentDateTime := FFormattedDateTime;
     // Calculate memory and disk percentages
     MemPercent := MemoryUtilization;
-    if FTotalPhysicalMemory > 0 then
-      DiskPercent := (FUsedDiskSpace * 100) div (FUsedDiskSpace + DiskSpace)
-    else
-      DiskPercent := 0;
+   if FTotalDiskSpace > 0 then
+  DiskPercent := (FUsedDiskSpace * 100) div FTotalDiskSpace
+else
+  DiskPercent := 0;
 
     // Create an array of all text lines to be displayed
     SetLength(InfoLines, 12); // Allocate for maximum expected lines
